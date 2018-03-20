@@ -16,6 +16,8 @@ using System.Collections;
 using Microsoft.Win32;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Text.RegularExpressions;
+using System.Globalization;
 
 
 // RWC
@@ -183,6 +185,7 @@ namespace Reddit_Wallpaper_Changer
             setupSavedWallpaperLocation();
             setupAppDataLocation();
             setupThumbnailCache();
+            buildThumbnailCache();
             setupProxySettings();
             setupButtons();
             setupPanels();          
@@ -191,7 +194,6 @@ namespace Reddit_Wallpaper_Changer
             logSettings();
             database.connectToDatabase();
             if (Properties.Settings.Default.dbMigrated == false) { database.migrateOldBlacklist(); }
-            buildThumbnailCache();
             populateHistory();
             populateFavourites();
             populateBlacklist();
@@ -204,13 +206,15 @@ namespace Reddit_Wallpaper_Changer
         //======================================================================
         private void setupAppDataLocation()
         {
-            if (Properties.Settings.Default.AppDataPath == "")
-            {
-                String appDataFolderPath = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData) + @"\Reddit Wallpaper Changer";
-                System.IO.Directory.CreateDirectory(appDataFolderPath);
-                Properties.Settings.Default.AppDataPath = appDataFolderPath;
-                Properties.Settings.Default.Save();
-            }     
+            string appDataFolderPath;
+            if (Properties.Settings.Default.AppDataPath.Any())
+                appDataFolderPath = Properties.Settings.Default.AppDataPath;
+            else
+                appDataFolderPath = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData) + @"\Reddit Wallpaper Changer";
+
+            Directory.CreateDirectory(appDataFolderPath);
+            Properties.Settings.Default.AppDataPath = appDataFolderPath;
+            Properties.Settings.Default.Save();  
         }
 
         //======================================================================
@@ -218,13 +222,15 @@ namespace Reddit_Wallpaper_Changer
         //======================================================================
         private void setupThumbnailCache()
         {
-            if (Properties.Settings.Default.thumbnailCache == "")
-            {                
-                String thumbnailCache = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData) + @"\Reddit Wallpaper Changer\ThumbnailCache";
-                System.IO.Directory.CreateDirectory(thumbnailCache);
-                Properties.Settings.Default.thumbnailCache = thumbnailCache;
-                Properties.Settings.Default.Save();
-            }
+            string thumbnailCachePath;
+            if (Properties.Settings.Default.thumbnailCache.Any())
+                thumbnailCachePath = Properties.Settings.Default.thumbnailCache;
+            else
+                thumbnailCachePath = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData) + @"\Reddit Wallpaper Changer\ThumbnailCache";
+
+            Directory.CreateDirectory(thumbnailCachePath);
+            Properties.Settings.Default.thumbnailCache = thumbnailCachePath;
+            Properties.Settings.Default.Save();
         }
 
 
@@ -424,6 +430,62 @@ namespace Reddit_Wallpaper_Changer
 
             selectedPanel = configurePanel;
             selectedButton = configureButton;
+        }
+
+        //======================================================================
+        // Parse subreddits string into array of current usable subreddits
+        // Expects a URL-safe list of subreddit names accompanied by an
+        //  optional 24-hour time range in the format [H:mm-H:mm]
+        // Skips malformed entries
+        //======================================================================
+        private string[] parseSubredditsList(string subs)
+        {
+            var subsList = new List<string>();
+
+            subs = subs.Trim('+');
+            var splitList = subs.Split('+').ToList();
+
+            Regex nameTimeRegex = new Regex(@"^(?<name>[^[\]+]+)(?:\[(?<t1>[0-9]{1,2}:[0-9]{2})-(?<t2>[0-9]{1,2}:[0-9]{2})+\])?");
+            foreach (var entry in splitList)
+            {
+                var r = nameTimeRegex.Match(entry);
+                if (!r.Groups["name"].Success)
+                    continue;
+
+                if (!r.Groups["t1"].Success)
+                {
+                    subsList.Add(r.Groups["name"].Value);
+                    continue;
+                }
+
+                var t1 = r.Groups["t1"].Value;
+                var t2 = r.Groups["t2"].Value;
+
+                DateTime dt1;
+                DateTime dt2;
+
+                try
+                {
+                    dt1 = System.DateTime.ParseExact(t1, "H:mm", CultureInfo.InvariantCulture);
+                    dt2 = System.DateTime.ParseExact(t2, "H:mm", CultureInfo.InvariantCulture);
+                }
+                catch (FormatException e)
+                {
+                    Logging.LogMessageToFile("Malformed timecode in entry: \"" + entry + "\". Skipping.", 1);
+                    continue;
+                }
+
+                if (dt2 < dt1)
+                    dt2 += new TimeSpan(1, 0, 0, 0);
+
+                var now = System.DateTime.Now;
+                if (now >= dt1 && now <= dt2)
+                {
+                    subsList.Add(r.Groups["name"].Value);
+                }
+            }
+
+            return subsList.ToArray();
         }
 
         //======================================================================
@@ -748,7 +810,14 @@ namespace Reddit_Wallpaper_Changer
                 String subreddits = Properties.Settings.Default.subredditsUsed.Replace(" ", "").Replace("www.reddit.com/", "").Replace("reddit.com/", "").Replace("http://", "").Replace("/r/", "");
 
                 var rand = new Random();
-                string[] subs = subreddits.Split('+');
+                string[] subs = parseSubredditsList(subreddits);
+                if (subs.Length == 0)
+                {
+                    updateStatus("No subreddits available for wallpaper change.");
+                    Logging.LogMessageToFile("No subs to pull wallpapers from. Aborting.", 0);
+                    return;
+                }
+
                 string sub = subs[rand.Next(0, subs.Length)];
                 updateStatus("Searching /r/" + sub + " for a wallpaper...");
                 Logging.LogMessageToFile("Selected sub to search: " + sub, 0);
@@ -773,47 +842,47 @@ namespace Reddit_Wallpaper_Changer
                 {
                     case 0:
                         // Random
-                        formURL += "/search.json?q=" + query + randomSort[random.Next(0, 4)] + randomT[random.Next(0, 5)] + "&restrict_sr=on";
+                        formURL += "/search.json?q=" + query + randomSort[random.Next(0, 4)] + randomT[random.Next(0, 5)];
                         Logging.LogMessageToFile("Full URL Search String: " + formURL, 0);
                         break;  
                     case 1:
                         // Newest 
-                        formURL += "/search.json?q=" + query + "&sort=new&restrict_sr=on";
+                        formURL += "/search.json?q=" + query + "&sort=new";
                         Logging.LogMessageToFile("Full URL Search String: " + formURL, 0);
                         break;
                     case 2:
                         // Hot Today
-                        formURL += "/search.json?q=" + query + "&sort=hot&restrict_sr=on&t=day";
+                        formURL += "/search.json?q=" + query + "&sort=hot&t=day";
                         Logging.LogMessageToFile("Full URL Search String: " + formURL, 0);
                         break;
                     case 3:
                         // Top Last Hour
-                        formURL += "/search.json?q=" + query + "&sort=top&restrict_sr=on&t=hour";
+                        formURL += "/search.json?q=" + query + "&sort=top&t=hour";
                         Logging.LogMessageToFile("Full URL Search String: " + formURL, 0);
                         break;
                     case 4:
                          // Top Today
-                        formURL += "/search.json?q=" + query + "&sort=top&restrict_sr=on&t=day";
+                        formURL += "/search.json?q=" + query + "&sort=top&t=day";
                         Logging.LogMessageToFile("Full URL Search String: " + formURL, 0);
                         break;
                     case 5:
                         // Top Week
-                        formURL += "/search.json?q=" + query + "&sort=top&restrict_sr=on&t=week";
+                        formURL += "/search.json?q=" + query + "&sort=top&t=week";
                         Logging.LogMessageToFile("Full URL Search String: " + formURL, 0);
                         break;
                     case 6:
                         // Top Month
-                        formURL += "/search.json?q=" + query + "&sort=top&restrict_sr=on&t=month";
+                        formURL += "/search.json?q=" + query + "&sort=top&t=month";
                         Logging.LogMessageToFile("Full URL Search String: " + formURL, 0);
                         break;
                     case 7:
                          // Top Year
-                        formURL += "/search.json?q=" + query + "&sort=top&restrict_sr=on&t=year";
+                        formURL += "/search.json?q=" + query + "&sort=top&t=year";
                         Logging.LogMessageToFile("Full URL Search String: " + formURL, 0);
                         break;
                     case 8:
                          // Top All Time
-                         formURL += "/search.json?q=" + query + "&sort=top&restrict_sr=on&t=all";
+                         formURL += "/search.json?q=" + query + "&sort=top&t=all";
                          Logging.LogMessageToFile("Full URL Search String: " + formURL, 0);
                          break;
                      case 9:
@@ -1440,6 +1509,7 @@ namespace Reddit_Wallpaper_Changer
         //======================================================================
         private void exitToolStripMenuItem_Click(object sender, EventArgs e)
         {
+            wallpaperCleanup();
             Logging.LogMessageToFile("Exiting Reddit Wallpaper Changer.", 0);
             realClose = true;
             wallpaperChangeTimer.Enabled = false;
@@ -1557,7 +1627,15 @@ namespace Reddit_Wallpaper_Changer
         private void blacklistDataGrid_CellContentClick(object sender, DataGridViewCellEventArgs e)
         {
             int rowIndex = e.RowIndex;
-            System.Diagnostics.Process.Start("http://reddit.com/" + blacklistDataGrid.Rows[e.RowIndex].Cells[2].Value.ToString());
+            try
+            {
+
+                System.Diagnostics.Process.Start("http://reddit.com/" + blacklistDataGrid.Rows[e.RowIndex].Cells[2].Value.ToString());
+            }
+            catch
+            {
+
+            }
         }
 
         //======================================================================
@@ -1566,7 +1644,14 @@ namespace Reddit_Wallpaper_Changer
         private void historyDataGrid_CellContentClick(object sender, DataGridViewCellEventArgs e)
         {
             int rowIndex = e.RowIndex;
-            System.Diagnostics.Process.Start("http://reddit.com/" + historyDataGrid.Rows[e.RowIndex].Cells[2].Value.ToString());
+            try
+            {
+                System.Diagnostics.Process.Start("http://reddit.com/" + historyDataGrid.Rows[e.RowIndex].Cells[2].Value.ToString());
+            }
+            catch
+            {
+
+            }
         }
 
         //======================================================================
@@ -1575,7 +1660,14 @@ namespace Reddit_Wallpaper_Changer
         private void favouritesDataGrid_CellContentClick(object sender, DataGridViewCellEventArgs e)
         {
             int rowIndex = e.RowIndex;
-            System.Diagnostics.Process.Start("http://reddit.com/" + favouritesDataGrid.Rows[e.RowIndex].Cells[2].Value.ToString());
+            try
+            {
+                System.Diagnostics.Process.Start("http://reddit.com/" + favouritesDataGrid.Rows[e.RowIndex].Cells[2].Value.ToString());
+            }
+            catch
+            {
+
+            }
         }
 
         //======================================================================
@@ -2237,7 +2329,6 @@ namespace Reddit_Wallpaper_Changer
                         row.SetValues(image, item.titlestring, item.threadidstring, item.urlstring, item.datestring);
                     }
                 }
-
                 Logging.LogMessageToFile("History panel reloaded.", 0);
                 return true;
             }
@@ -2270,6 +2361,7 @@ namespace Reddit_Wallpaper_Changer
                 }
 
                 Logging.LogMessageToFile("Blacklisted wallpapers loaded.", 0);
+
             }
             catch (Exception ex)
             {
@@ -2809,23 +2901,22 @@ namespace Reddit_Wallpaper_Changer
         //======================================================================
         private void btnRebuildThumbnails_Click(object sender, EventArgs e)
         {
-            DialogResult choice = MessageBox.Show("This will remove all wallpaper thumbnails and recreate them.\r\n\r\r" +
-                "Reddit Wallpaper Will be restarted to complete this process. Continue?", "Rebuild Thumbnails?", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            DialogResult choice = MessageBox.Show("This will remove all wallpaper thumbnails and recreate them\r\n" +
+                "when Reddit Wallpaper Changer next starts. Continue?", "Rebuild Thumbnails?", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
             if (choice == DialogResult.Yes)
             {
                 try
                 {
-                    Logging.LogMessageToFile("Restarting Reddit Wallpaper Changer to clear thumbnail cache.", 0);
+                    MessageBox.Show("The wallpaper thumbnail cache will be recreated when\r\n" +
+                        "Reddit Wallpaper Changer next opens.", "Information", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    Logging.LogMessageToFile("User has chosen to to clear the thumbnail cache.", 0);
                     Properties.Settings.Default.rebuildThumbCache = true;
                     Properties.Settings.Default.Save();
-
-                    System.Diagnostics.Process.Start(System.Reflection.Assembly.GetEntryAssembly().Location);
-                    System.Environment.Exit(0);
 
                 }
                 catch(Exception ex)
                 {
-                    Logging.LogMessageToFile("Error restarting RWC: " + ex.Message, 1);
+                    Logging.LogMessageToFile("Error: " + ex.Message, 1);
                 }
 
             }
@@ -2848,9 +2939,12 @@ namespace Reddit_Wallpaper_Changer
                 {
                     file.Delete();
                 }
-                Logging.LogMessageToFile("Thumbnail cache erased.", 0);
                 Properties.Settings.Default.rebuildThumbCache = false;
                 Properties.Settings.Default.Save();
+
+                buildThumbnailCache();
+
+                Logging.LogMessageToFile("Thumbnail cache erased.", 0);
 
             }
             catch(Exception ex)
@@ -2858,6 +2952,30 @@ namespace Reddit_Wallpaper_Changer
                 Logging.LogMessageToFile("Error rebuilding thumbnail cache: " + ex.Message, 1);
             }
         }
+
+        //======================================================================
+        // Delete all downloaded wallpapers on close 
+        //======================================================================
+        public void wallpaperCleanup()
+        {
+            try
+            {
+                foreach (var item in database.deleteOnExit())
+                {
+                    var dir = new DirectoryInfo(System.IO.Path.GetTempPath());
+
+                    foreach (var file in dir.EnumerateFiles(item.threadidstring + ".*"))
+                    {
+                        file.Delete();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logging.LogMessageToFile("Error deleting wallpaper: " + ex.Message, 1);
+            }
+        }
+
     }
 }
 
